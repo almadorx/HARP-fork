@@ -1,10 +1,10 @@
 # HARP: Hadamard-Preconditioned Adaptive Rotations for Extreme LLM Quantization
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2605.29843">
-    <img src="https://img.shields.io/badge/arXiv-2605.29843-b31b1b.svg">
-  </a>
+  <a href="https://arxiv.org/abs/2605.29843"><img src="https://img.shields.io/badge/arXiv-2605.29843-b31b1b.svg" alt="arXiv 2605.29843"></a>&nbsp;
+  <a href="https://huggingface.co/collections/brain-lab/harp-quantized-models"><img src="https://img.shields.io/badge/Hugging%20Face-HARP%20Quantized%20Models-334155?style=flat&amp;logo=huggingface&amp;logoColor=FFD21E&amp;labelColor=0F172A" alt="HARP Quantized Models on Hugging Face"></a>
 </p>
+
 
 <p align="center">
   <b>Learnable orthogonal preprocessing for extreme LLM quantization</b>
