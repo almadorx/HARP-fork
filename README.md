@@ -1,8 +1,13 @@
 # HARP: Hadamard-Preconditioned Adaptive Rotations for Extreme LLM Quantization
 
 <p align="center">
+  <img src="figures/emnlp.png" alt="Accepted to EMNLP 2026" width="500">
+</p>
+
+<p align="center">
   <a href="https://arxiv.org/abs/2605.29843"><img src="https://img.shields.io/badge/arXiv-2605.29843-b31b1b.svg" alt="arXiv 2605.29843"></a>&nbsp;
-  <a href="https://huggingface.co/collections/brain-lab/harp-quantized-models"><img src="https://img.shields.io/badge/Hugging%20Face-HARP%20Quantized%20Models-334155?style=flat&amp;logo=huggingface&amp;logoColor=FFD21E&amp;labelColor=0F172A" alt="HARP Quantized Models on Hugging Face"></a>
+  <a href="https://huggingface.co/collections/brain-lab/harp-quantized-models"><img src="https://img.shields.io/badge/Hugging%20Face-HARP%20Quantized%20Models-334155?style=flat&amp;logo=huggingface&amp;logoColor=FFD21E&amp;labelColor=0F172A" alt="HARP Quantized Models on Hugging Face"></a>&nbsp;
+  <img src="https://img.shields.io/badge/EMNLP-2026-c41e3a.svg" alt="Accepted to EMNLP 2026">
 </p>
 
 
@@ -13,6 +18,15 @@
 > **TL;DR**
 >
 > HARP replaces the fixed randomized Hadamard transform used in SOTA PTQ pipelines with a learnable structured orthogonal processor trained only on calibration data. It improves quantization quality while preserving the original quantizer, deployment pipeline, and inference efficiency.
+
+<p align="center">
+  <img src="figures/harp_scaling_w2_2bit_small_split_final.png" alt="WikiText2 quality-size scaling at 2 bits, Llama 3.2 models" width="45%">
+  &nbsp;&nbsp;
+  <img src="figures/harp_scaling_w2_2bit_large_split_final.png" alt="WikiText2 quality-size scaling at 2 bits, Llama 2 models" width="45%">
+</p>
+<p align="center">
+  <sub><b>WikiText2 quality–size scaling at 2 bits.</b> HARP uses int8 parameter storage. Plots split by model family to keep quality gaps visible across scales.</sub>
+</p>
 
 ## What is HARP?
 
@@ -31,6 +45,81 @@ To answer this, **HARP** (Hadamard-Preconditioned Adaptive Rotations) introduces
 * can be integrated into existing PTQ pipelines with minimal changes.
 
 The resulting processor better adapts to the statistics of each layer, reducing quantization error while preserving the original backend workflow.
+
+---
+
+## Results
+
+Perplexity (PPL ↓) for QuIP# with fixed RHT vs. HARP on Llama 2, at context length 4096. BPP includes HARP processor storage.
+
+<table>
+<thead>
+<tr>
+<th align="center" rowspan="2">Bits</th>
+<th align="left" rowspan="2">Method</th>
+<th align="center" colspan="3" style="border-left:2px solid #888; text-align:center;">Llama 2 7B</th>
+<th align="center" colspan="3" style="border-left:2px solid #888; text-align:center;">Llama 2 13B</th>
+<th align="center" colspan="3" style="border-left:2px solid #888; text-align:center;">Llama 2 70B</th>
+</tr>
+<tr>
+<th align="right" style="border-left:2px solid #888;">BPP&nbsp;↓</th>
+<th align="right">W2&nbsp;↓</th>
+<th align="right">C4&nbsp;↓</th>
+<th align="right" style="border-left:2px solid #888;">BPP&nbsp;↓</th>
+<th align="right">W2&nbsp;↓</th>
+<th align="right">C4&nbsp;↓</th>
+<th align="right" style="border-left:2px solid #888;">BPP&nbsp;↓</th>
+<th align="right">W2&nbsp;↓</th>
+<th align="right">C4&nbsp;↓</th>
+</tr>
+</thead>
+<tbody>
+<tr style="border-top:2px solid #888;">
+<td align="center">16</td><td>FP16</td>
+<td align="right" style="border-left:2px solid #888;">16.00</td><td align="right">5.12</td><td align="right">6.63</td>
+<td align="right" style="border-left:2px solid #888;">16.00</td><td align="right">4.57</td><td align="right">6.05</td>
+<td align="right" style="border-left:2px solid #888;">16.00</td><td align="right">3.12</td><td align="right">4.97</td>
+</tr>
+<tr style="border-top:2px solid #888;">
+<td align="center" rowspan="2">2</td><td>QuIP# (RHT)</td>
+<td align="right" style="border-left:2px solid #888;">2.00</td><td align="right">8.22</td><td align="right">10.86</td>
+<td align="right" style="border-left:2px solid #888;">2.00</td><td align="right">6.05</td><td align="right">8.06</td>
+<td align="right" style="border-left:2px solid #888;">2.00</td><td align="right">4.16</td><td align="right">6.01</td>
+</tr>
+<tr>
+<td><b>HARP</b></td>
+<td align="right" style="border-left:2px solid #888;">2.06</td><td align="right"><b>7.25</b></td><td align="right"><b>9.51</b></td>
+<td align="right" style="border-left:2px solid #888;">2.03</td><td align="right"><b>5.73</b></td><td align="right"><b>7.64</b></td>
+<td align="right" style="border-left:2px solid #888;">2.02</td><td align="right"><b>4.01</b></td><td align="right"><b>5.82</b></td>
+</tr>
+<tr style="border-top:2px solid #888;">
+<td align="center" rowspan="2">3</td><td>QuIP# (RHT)</td>
+<td align="right" style="border-left:2px solid #888;">3.00</td><td align="right">5.61</td><td align="right">7.35</td>
+<td align="right" style="border-left:2px solid #888;">3.00</td><td align="right">4.89</td><td align="right">6.49</td>
+<td align="right" style="border-left:2px solid #888;">3.00</td><td align="right">3.40</td><td align="right">5.20</td>
+</tr>
+<tr>
+<td><b>HARP</b></td>
+<td align="right" style="border-left:2px solid #888;">3.06</td><td align="right"><b>5.52</b></td><td align="right"><b>7.21</b></td>
+<td align="right" style="border-left:2px solid #888;">3.03</td><td align="right"><b>4.82</b></td><td align="right"><b>6.40</b></td>
+<td align="right" style="border-left:2px solid #888;">3.02</td><td align="right"><b>3.35</b></td><td align="right"><b>5.16</b></td>
+</tr>
+<tr style="border-top:2px solid #888;">
+<td align="center" rowspan="2">4</td><td>QuIP# (RHT)</td>
+<td align="right" style="border-left:2px solid #888;">4.00</td><td align="right">5.27</td><td align="right">6.85</td>
+<td align="right" style="border-left:2px solid #888;">4.00</td><td align="right">4.70</td><td align="right">6.20</td>
+<td align="right" style="border-left:2px solid #888;">4.00</td><td align="right">3.22</td><td align="right">5.05</td>
+</tr>
+<tr>
+<td><b>HARP</b></td>
+<td align="right" style="border-left:2px solid #888;">4.06</td><td align="right"><b>5.24</b></td><td align="right"><b>6.81</b></td>
+<td align="right" style="border-left:2px solid #888;">4.03</td><td align="right"><b>4.66</b></td><td align="right"><b>6.15</b></td>
+<td align="right" style="border-left:2px solid #888;">4.02</td><td align="right"><b>3.20</b></td><td align="right"><b>5.02</b></td>
+</tr>
+</tbody>
+</table>
+
+HARP consistently improves W2/C4 perplexity over the fixed-RHT baseline at every bit-width and model size, at a negligible BPP overhead from processor storage.
 
 ---
 
