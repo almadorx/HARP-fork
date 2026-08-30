@@ -1,7 +1,7 @@
 # HARP: Hadamard-Preconditioned Adaptive Rotations for Extreme LLM Quantization
 
 <p align="center">
-  <img src="figures/emnlp.png" alt="Accepted to EMNLP 2026" width="500">
+  <img src="figures/emnlp.png" alt="Accepted to EMNLP 2026" width="1000">
 </p>
 
 <p align="center">
