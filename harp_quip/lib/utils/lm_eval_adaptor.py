@@ -114,7 +114,7 @@ class LMEvalAdaptor(BaseLM):
             else:
                 kwargs = {}
             out = self.model(inps, **kwargs)[0]
-            return out
+            return out.float()
             # if "opt" in self.model_name:  # there are a few extra tokens in opt, which we should omit
             #     return out[:, :, :50257]
             # else:

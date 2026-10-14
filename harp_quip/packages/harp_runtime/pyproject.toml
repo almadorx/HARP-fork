@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harp-runtime"
+version = "0.2.0"
+description = "Scheduled inference execution for HARP transforms"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["torch>=2.8"]
+
+[project.optional-dependencies]
+cuda = ["triton>=3.4", "ninja"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harp_runtime*"]
+
+[tool.setuptools.package-data]
+harp_runtime = ["csrc/*.cu"]

@@ -1,71 +1,123 @@
-import argparse
-import json
-import math
-import os
-import random
+"""Evaluate token-weighted perplexity with optimized quantized inference."""
 
-import datasets
-import glog
+import argparse
+import math
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import torch
 from tqdm import tqdm
-
 from lib.utils import gptq_data_utils
-from lib.utils.unsafe_import import model_from_hf_path
-
-torch.set_grad_enabled(False)
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--hf_path', default='hfized/quantized_hada_70b', type=str)
-parser.add_argument('--seqlen', default=4096, type=int)
-parser.add_argument('--no_use_cuda_graph', action='store_true')
-parser.add_argument('--no_use_flash_attn', action='store_true')
+from eval.runtime import add_arguments, identity, load_model, memory, metadata, save
 
 
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    add_arguments(result)
+    result.add_argument("--seqlen", type=int, default=4096)
+    result.add_argument("--datasets", default="wikitext2,c4")
+    result.add_argument("--tokens_path")
+    result.add_argument("--limit", type=int)
+    result.add_argument("--no_use_cuda_graph", action="store_true")
+    result.add_argument("--output_path")
+    return result
+
+
+@torch.no_grad()
 def main(args):
-    datasets = ['wikitext2', 'c4']
-    model, model_str = model_from_hf_path(
-        args.hf_path,
-        use_cuda_graph=not args.no_use_cuda_graph,
-        use_flash_attn=not args.no_use_flash_attn)
+    if args.seqlen < 2:
+        raise ValueError("seqlen must be at least two")
+    model, model_name, handle, setup = load_model(
+        args, graphs=not args.no_use_cuda_graph
+    )
+    report = dict(complete=False, metadata=metadata(args), setup=setup, datasets=[])
+    names = ["tokens_file"] if args.tokens_path else args.datasets.split(",")
+    for name in names:
+        if args.tokens_path:
+            tokens = torch.load(args.tokens_path, map_location="cpu", weights_only=True)
+            if isinstance(tokens, dict):
+                tokens = tokens["input_ids"]
+            source = identity(args.tokens_path)
+        else:
+            tokens = gptq_data_utils.get_test_tokens(
+                name, seed=args.seed, seqlen=args.seqlen, model=model_name
+            )
+            source = dict(dataset=name, seed=args.seed, tokenizer=model_name)
+        count = tokens.numel() // args.seqlen
+        if args.limit is not None:
+            count = min(count, args.limit)
+        if count < 1:
+            raise ValueError("Not enough tokens for one evaluation chunk")
+        chunks = tokens.reshape(-1)[: count * args.seqlen].reshape(count, args.seqlen)
+        first = chunks[:1].cuda()
+        warm_memory = memory()
+        warm_start = time.perf_counter()
+        model(
+            first, use_cache=False, output_hidden_states=False, output_attentions=False
+        )
+        torch.cuda.synchronize()
+        warmup = dict(
+            seconds=time.perf_counter() - warm_start,
+            memory_before=warm_memory,
+            memory_after=memory(),
+        )
+        torch.cuda.reset_peak_memory_stats()
+        before = memory()
+        losses = []
+        for ids in tqdm(chunks, desc=name):
+            ids = ids[None].cuda()
+            logits = model(
+                ids,
+                use_cache=False,
+                output_hidden_states=False,
+                output_attentions=False,
+            ).logits
+            loss = torch.nn.functional.cross_entropy(
+                logits[:, :-1].float().reshape(-1, logits.shape[-1]),
+                ids[:, 1:].reshape(-1),
+            )
+            losses.append(float(loss))
+        values = torch.tensor(losses, dtype=torch.float64)
+        mean = float(values.mean())
+        standard_error = (
+            float(values.std(correction=1) / math.sqrt(count)) if count > 1 else None
+        )
+        result = dict(
+            dataset=name,
+            source=source,
+            chunks=count,
+            predicted_tokens=count * (args.seqlen - 1),
+            seqlen=args.seqlen,
+            mean_nll=mean,
+            perplexity=math.exp(mean),
+            chunk_nll=losses,
+            nll_standard_error=standard_error,
+            ppl_ci95=(
+                [
+                    math.exp(mean - 1.96 * standard_error),
+                    math.exp(mean + 1.96 * standard_error),
+                ]
+                if standard_error is not None
+                else None
+            ),
+            memory_before=before,
+            memory_after=memory(),
+            warmup=warmup,
+            limited=args.limit is not None,
+        )
+        report["datasets"].append(result)
+        save(args.output_path, report)
+        print(
+            f"{name}: PPL={result['perplexity']:.6f}, NLL={mean:.6f}, chunks={count}",
+            flush=True,
+        )
+    report["coverage"] = handle.report() if handle else None
+    report["complete"] = True
+    save(args.output_path, report)
 
-    for dataset in datasets:
-        input_tok = gptq_data_utils.get_test_tokens(dataset,
-                                                    seed=args.seed,
-                                                    seqlen=args.seqlen,
-                                                    model=model_str)
-        nsamples = input_tok.numel() // args.seqlen
-        input_tok = input_tok[0, :(args.seqlen * nsamples)].view(
-            nsamples, args.seqlen)
 
-        if not args.no_use_cuda_graph:
-            model.reset()
-
-        loss_fct = torch.nn.CrossEntropyLoss().cuda()
-        acc_loss = 0.0
-        progress = tqdm(range(nsamples))
-        for ii in progress:
-            input = input_tok[ii, :].cuda().view(1, -1)
-            output = model(input,
-                           use_cache=False,
-                           output_hidden_states=False,
-                           output_attentions=False)[0]
-            shift_logits = output[:, :-1, :].contiguous()
-            shift_labels = input[:, 1:]
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)),
-                            shift_labels.view(-1))
-            acc_loss += loss.item()
-            progress.set_description(f"avg_loss = {acc_loss/(ii+1)}")
-
-        avg_loss = acc_loss / nsamples
-
-        ppl = torch.exp(torch.tensor(avg_loss)).item()
-        glog.info(f'{dataset} perplexity: {ppl}')
-
-
-if __name__ == '__main__':
-    torch.set_grad_enabled(False)
-    args = parser.parse_args()
-    random.seed(args.seed)
-    torch.random.manual_seed(args.seed)
-    main(args)
+if __name__ == "__main__":
+    main(parser().parse_args())

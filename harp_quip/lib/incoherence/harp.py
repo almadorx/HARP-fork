@@ -33,7 +33,6 @@ class HARPProcessor(IncoherenceProcessor):
         theta_clip: Optional[float] = None,
         fixed_mixer: str = "had_or_qr",
         fixed_seed: int = 0,
-        
         strategy: str = "proxy",
         lr_u: float = 3e-2,
         lr_v: float = 3e-2,
@@ -45,6 +44,8 @@ class HARPProcessor(IncoherenceProcessor):
         q_recompute_every: int = 1,
         early_stop_window: int = 0,
         early_stop_min_rel_improve: float = 0.01,
+        hbd_mode: str = "paper",
+        eval_every: int = 0,
     ):
         super().__init__()
         self.n = int(n)
@@ -61,6 +62,10 @@ class HARPProcessor(IncoherenceProcessor):
 
         self.hbd_lambda = float(hbd_lambda)
         self.hbd_block = int(hbd_block)
+
+        self.hbd_mode = str(hbd_mode)
+
+        self.eval_every = int(eval_every)
         self.chunk_size = int(chunk_size)
 
         self.q_recompute_every = max(1, int(q_recompute_every))
@@ -81,7 +86,7 @@ class HARPProcessor(IncoherenceProcessor):
             device=device,
             dtype=torch.float32,
             kron_fallback=kron_fallback,
-            use_givens_b2=use_givens_b2
+            use_givens_b2=use_givens_b2,
         )
         self.harp_u = HARPRotationPreconditioned(
             d=self.m,
@@ -97,7 +102,7 @@ class HARPProcessor(IncoherenceProcessor):
             device=device,
             dtype=torch.float32,
             kron_fallback=kron_fallback,
-            use_givens_b2=use_givens_b2
+            use_givens_b2=use_givens_b2,
         )
 
     def _auto_h_chunk_rows(self, H: torch.Tensor) -> Optional[int]:
@@ -110,7 +115,10 @@ class HARPProcessor(IncoherenceProcessor):
         if chunk_rows is None or X.shape[0] <= chunk_rows:
             return rot.transform(X)
         return torch.cat(
-            [rot.transform(X[s:s + chunk_rows]) for s in range(0, X.shape[0], chunk_rows)],
+            [
+                rot.transform(X[s : s + chunk_rows])
+                for s in range(0, X.shape[0], chunk_rows)
+            ],
             dim=0,
         )
 
@@ -123,26 +131,23 @@ class HARPProcessor(IncoherenceProcessor):
         H_right = self._transform_rows_chunked(self.harp_v, H, chunk_rows)
         H_tilde_T = self._transform_rows_chunked(self.harp_v, H_right.T, chunk_rows)
         return H_tilde_T.T
-    
+
     @torch.no_grad()
     def _transform_H_diag_only_gpu_no_grad(self, H: torch.Tensor) -> torch.Tensor:
         """
         Exact diagonal of H_tilde = V^T H V.
         GPU-only, no CPU offload, no autograd graph.
         """
-        H_right = self.harp_v.transform(H) # H @ V
-        H_tilde_T = self.harp_v.transform(H_right.T) # (V^T H V)^T
+        H_right = self.harp_v.transform(H)
+        H_tilde_T = self.harp_v.transform(H_right.T)
         h_diag = H_tilde_T.diagonal().clone()
         del H_right, H_tilde_T
         torch.cuda.empty_cache()
         return h_diag
 
     def transform(self, H: torch.Tensor, W: torch.Tensor):
-        """
-        Returns:
-          H_tilde = V^T H V
-          W_tilde = U^T W V
-        """
+        "Returns:"
+
         with torch.no_grad():
             H_tilde = self._transform_H_two_sided_exact(H)
 
@@ -163,9 +168,9 @@ class HARPProcessor(IncoherenceProcessor):
 
     def forward_post_transform(self, y: torch.Tensor):
         return self.harp_u.inverse_transform(y)
-    
+
     def _compute_proxy_scale(self, W_tilde, codebook, args):
-        scale = (W_tilde.pow(2).mean().sqrt() + 1e-8)
+        scale = W_tilde.pow(2).mean().sqrt() + 1e-8
         if getattr(args, "scale_override", -1) and args.scale_override > 0:
             scale = scale / float(args.scale_override)
         else:
@@ -174,7 +179,9 @@ class HARPProcessor(IncoherenceProcessor):
 
     def _proxy_quant_kwargs(self, args):
         quant_kwargs = {}
-        resid_scale_override = getattr(args, "resid_scale_override", -1) if args is not None else -1
+        resid_scale_override = (
+            getattr(args, "resid_scale_override", -1) if args is not None else -1
+        )
         if resid_scale_override is not None and resid_scale_override > 0:
             quant_kwargs["resid_scale_override"] = float(resid_scale_override)
         return quant_kwargs
@@ -207,7 +214,7 @@ class HARPProcessor(IncoherenceProcessor):
         h_diag = h_diag.abs().detach().to(torch.float32)
         h_diag = h_diag / (h_diag.mean() + 1e-8)
 
-        weighted_error = (error ** 2) * h_diag.unsqueeze(0)
+        weighted_error = (error**2) * h_diag.unsqueeze(0)
         return torch.mean(weighted_error)
 
     def _should_early_stop(self, loss_history):
@@ -230,10 +237,8 @@ class HARPProcessor(IncoherenceProcessor):
         return self._proxy_loss_from_target(W_tilde, h_diag, W_q, scale)
 
     def _proxy_loss(self, W_tilde, H_tilde, codebook, args):
-        return self._proxy_loss_from_hdiag(
-            W_tilde, H_tilde.diagonal(), codebook, args
-        )
-    
+        return self._proxy_loss_from_hdiag(W_tilde, H_tilde.diagonal(), codebook, args)
+
     def _disable_hbd_for_this_layer(self) -> bool:
         return self.n >= 24672
 
@@ -248,13 +253,43 @@ class HARPProcessor(IncoherenceProcessor):
             return off.pow(2).mean()
 
         nb = n // b
-        H4 = H_tilde.view(nb, b, nb, b).permute(0, 2, 1, 3) # [nb, nb, b, b]
+        H4 = H_tilde.view(nb, b, nb, b).permute(0, 2, 1, 3)
         total = H4.pow(2).sum()
-        diag_blocks = torch.diagonal(H4, dim1=0, dim2=1) # [nb, b, b]
+        diag_blocks = torch.diagonal(H4, dim1=0, dim2=1)
         diag_sum = diag_blocks.pow(2).sum()
         off_sum = total - diag_sum
         denom = H4.numel()
         return off_sum / denom
+
+    def _ldl_trace_loss(self, H_tilde: torch.Tensor) -> torch.Tensor:
+        """Return scalar LDL trace normalized by a detached Hessian trace."""
+
+        n = H_tilde.shape[0]
+        jitter = 1e-5 * H_tilde.diagonal().mean().detach()
+        Hd = H_tilde + jitter * torch.eye(n, device=H_tilde.device, dtype=H_tilde.dtype)
+        R = torch.linalg.cholesky(Hd.double(), upper=True)
+        trD = (R.diagonal() ** 2).sum().to(H_tilde.dtype)
+        return trD / torch.trace(H_tilde).detach()
+
+    @torch.no_grad()
+    def _surrogate_score(
+        self, H: torch.Tensor, W: torch.Tensor, codebook, args
+    ) -> float:
+        """Score proxy error weighted by the normalized scalar LDL trace."""
+
+        try:
+            H_tilde = self._transform_H_two_sided_exact(H)
+            W_right = self.harp_v.transform(W)
+            W_tilde = self.harp_u.transform(W_right.T).T
+            scale, W_q = self._compute_proxy_quant_target(W_tilde, codebook, args)
+            ldiag = self._proxy_loss_from_target(
+                W_tilde, H_tilde.diagonal(), W_q, scale
+            ).item()
+            trd = self._ldl_trace_loss(H_tilde).item()
+            return float(ldiag * trd)
+        except Exception as e:
+            glog.warning(f"HARP surrogate score failed: {e}")
+            return float("inf")
 
     @staticmethod
     def _set_req_grad(mod: nn.Module, flag: bool):
@@ -264,14 +299,28 @@ class HARPProcessor(IncoherenceProcessor):
 
     def trainable_param_groups(self) -> Dict[str, List[nn.Parameter]]:
         def collect(mod: nn.Module) -> List[nn.Parameter]:
-            return [p for p in mod.parameters(recurse=True) if isinstance(p, nn.Parameter) and p.numel() > 0]
+            return [
+                p
+                for p in mod.parameters(recurse=True)
+                if isinstance(p, nn.Parameter) and p.numel() > 0
+            ]
+
         return {"harp_u": collect(self.harp_u), "harp_v": collect(self.harp_v)}
 
-    def fit(self, H: torch.Tensor, W: torch.Tensor, codebook=None, x_samples: Optional[torch.Tensor] = None, args=None):
+    def fit(
+        self,
+        H: torch.Tensor,
+        W: torch.Tensor,
+        codebook=None,
+        x_samples: Optional[torch.Tensor] = None,
+        args=None,
+    ):
         if codebook is None:
             raise ValueError("HARPProcessor.fit requires codebook.")
         if torch.is_inference_mode_enabled():
-            raise RuntimeError("HARPProcessor fit can't run under torch.inference_mode().")
+            raise RuntimeError(
+                "HARPProcessor fit can't run under torch.inference_mode()."
+            )
 
         H = H.detach()
         W = W.detach()
@@ -293,11 +342,17 @@ class HARPProcessor(IncoherenceProcessor):
             raise RuntimeError("No HARP parameters to fit.")
 
         optimizer = optim.Adam(
-            [{"params": params_v, "lr": self.lr_v},
-             {"params": params_u, "lr": self.lr_u}]
+            [
+                {"params": params_v, "lr": self.lr_v},
+                {"params": params_u, "lr": self.lr_u},
+            ]
         )
 
-        need_hbd = (self.hbd_lambda > 0) and (not self._disable_hbd_for_this_layer())
+        need_hbd = (
+            (self.hbd_lambda > 0)
+            and (self.hbd_mode != "off")
+            and (not self._disable_hbd_for_this_layer())
+        )
 
         pbar = tqdm(desc=f"HARP({self.strategy})", total=self.steps, leave=False)
 
@@ -305,14 +360,24 @@ class HARPProcessor(IncoherenceProcessor):
         cached_q_target = None
         loss_history = []
 
+        track_best = self.eval_every > 0
+        best_score = float("inf")
+        best_state = None
+        if track_best:
+            with torch.no_grad():
+                best_score = self._surrogate_score(H, W, codebook, args)
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in self.state_dict().items()
+                }
+            glog.info(f"HARP init (RHT-family) surrogate score: {best_score:.6e}")
+
         for step in range(self.steps):
             optimizer.zero_grad(set_to_none=True)
 
             H_tilde = None
 
-            refresh_q = (
-                cached_q_target is None
-                or ((step % self.q_recompute_every) == 0)
+            refresh_q = cached_q_target is None or (
+                (step % self.q_recompute_every) == 0
             )
 
             if self.strategy == "proxy" and not need_hbd:
@@ -338,8 +403,10 @@ class HARPProcessor(IncoherenceProcessor):
                     H_tilde = self._transform_H_two_sided_exact(H)
 
                     if refresh_q:
-                        cached_scale, cached_q_target = self._compute_proxy_quant_target(
-                            W_tilde, codebook, args=args
+                        cached_scale, cached_q_target = (
+                            self._compute_proxy_quant_target(
+                                W_tilde, codebook, args=args
+                            )
                         )
 
                     loss = self._proxy_loss_from_target(
@@ -348,13 +415,15 @@ class HARPProcessor(IncoherenceProcessor):
                 else:
                     raise ValueError(f"Unsupported HARP strategy: {self.strategy}")
 
-                if self.hbd_lambda > 0:
+                if need_hbd:
                     if H_tilde is None:
                         H_tilde = self._transform_H_two_sided_exact(H)
-                    loss = loss + self.hbd_lambda * self._h_blockdiag_loss(H_tilde, block=self.hbd_block)
+                    if self.hbd_mode == "ldl":
+                        h_struct = self._ldl_trace_loss(H_tilde)
+                    else:
+                        h_struct = self._h_blockdiag_loss(H_tilde, block=self.hbd_block)
+                    loss = loss + self.hbd_lambda * h_struct
 
-
-            # optional L2 regularization
             if self.reg_theta > 0:
                 reg = 0.0
                 for p in params_v + params_u:
@@ -362,32 +431,67 @@ class HARPProcessor(IncoherenceProcessor):
                 loss = loss + self.reg_theta * reg
 
             loss.backward()
-            loss_history.append(float(loss.detach().cpu()))
 
             if self.grad_clip is not None and self.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(params_v + params_u, self.grad_clip)
 
             optimizer.step()
 
+            loss_history.append(float(loss.item()))
+
+            if track_best and ((step + 1) % self.eval_every == 0):
+                with torch.no_grad():
+                    score = self._surrogate_score(H, W, codebook, args)
+                if score < best_score:
+                    best_score = score
+                    best_state = {
+                        k: v.detach().cpu().clone()
+                        for k, v in self.state_dict().items()
+                    }
+
             if (step + 1) % 50 == 0:
                 pbar.set_postfix_str(f"loss={loss.item():.3e}", refresh=False)
                 pbar.update(50)
-            
+
             should_stop, stop_info = self._should_early_stop(loss_history)
             if should_stop:
                 prev_best, recent_best, rel_improve = stop_info
                 glog.info(
-                    f'HARP early stopping triggered at step {step + 1}: '
-                    f'prev_best={prev_best:.4e}, recent_best={recent_best:.4e}, '
-                    f'rel_improve={100.0 * rel_improve:.2f}%'
+                    f"HARP early stopping triggered at step {step + 1}: "
+                    f"prev_best={prev_best:.4e}, recent_best={recent_best:.4e}, "
+                    f"rel_improve={100.0 * rel_improve:.2f}%"
                 )
                 break
 
         pbar.close()
 
+        if track_best and best_state is not None:
+            with torch.no_grad():
+                final_score = self._surrogate_score(H, W, codebook, args)
+            if best_score < final_score:
+                self.load_state_dict(
+                    {
+                        k: v.to(next(self.parameters()).device)
+                        for k, v in best_state.items()
+                    }
+                )
+                glog.info(
+                    f"HARP: restored best iterate "
+                    f"(score {best_score:.6e} < final {final_score:.6e})"
+                )
+            else:
+                glog.info(
+                    f"HARP: keeping final iterate "
+                    f"(score {final_score:.6e} <= best tracked {best_score:.6e})"
+                )
+
+        self.train(False)
+        self.harp_u.train(False)
+        self.harp_v.train(False)
+
     def get_storage_bits(self):
         return self.harp_u.get_storage_bits() + self.harp_v.get_storage_bits()
-    
+
     @torch.no_grad()
     def quantize_theta_8bit(self, scale_dtype: torch.dtype = torch.float16):
         if hasattr(self.harp_u, "quantize_theta_8bit"):

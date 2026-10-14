@@ -42,6 +42,8 @@ def make_harp_cfg_from_args(args) -> Dict[str, Any]:
         "reg_theta": args.harp_reg_theta,
         "hbd_lambda": args.harp_hbd_lambda,
         "hbd_block": args.harp_hbd_block,
+        "hbd_mode": getattr(args, "harp_hbd_mode", "paper"),
+        "eval_every": getattr(args, "harp_eval_every", 0),
         "chunk_size": args.harp_chunk_size,
         "q_recompute_every": args.harp_q_recompute_every,
         "early_stop_window": args.harp_early_stop_window,

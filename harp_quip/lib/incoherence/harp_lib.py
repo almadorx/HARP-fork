@@ -8,10 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import math
-import torch
-import torch.nn as nn
-from typing import Optional
 
 def _is_pow2(n: int) -> bool:
     return (n > 0) and ((n & (n - 1)) == 0)
@@ -281,7 +277,7 @@ class FactorizedOrthogonalRotation(nn.Module):
         self.stage_is_givens: List[bool] = [
             (self.use_givens_b2 and (b_t == 2)) for b_t in self.stage_bs
         ]
-        
+
         for t, b_t in enumerate(self.stage_bs):
             M = _make_fixed_orthogonal(
                 b_t, device=(device or "cpu"), dtype=dtype,
@@ -359,7 +355,7 @@ class FactorizedOrthogonalRotation(nn.Module):
 
     def is_theta_quantized(self) -> bool:
         return bool(self.theta_is_quantized.item())
-    
+
     def _effective_angle(self, theta: torch.Tensor) -> torch.Tensor:
         if self.theta_clip is not None and self.theta_clip > 0:
             return torch.tanh(theta) * float(self.theta_clip)
@@ -482,14 +478,16 @@ class FactorizedOrthogonalRotation(nn.Module):
         blocks = torch.matmul(Q, M)
         return blocks.to(dtype=out_dtype)
 
-    def _get_blocks(self, p: int, t: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        if not self.training:
+    def _get_blocks(
+        self, p: int, t: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        if not self.training and not torch.is_grad_enabled():
             key = (device, dtype, p, t)
             if key not in self._blocks_cache:
                 self._blocks_cache[key] = self._compute_blocks(p, t, device, dtype)
             return self._blocks_cache[key]
         return self._compute_blocks(p, t, device, dtype)
-    
+
     def _apply_stride_pass(self, x2d: torch.Tensor, p: int, inverse: bool) -> torch.Tensor:
         """
         Apply one pass in stride mode. x2d is [B,n].
@@ -582,7 +580,7 @@ class FactorizedOrthogonalRotation(nn.Module):
                     bits += int(params) * 16
 
         return bits
-    
+
     def state_dict(self, destination=None, prefix: str = "", keep_vars: bool = False):
         sd = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
 
@@ -593,9 +591,35 @@ class FactorizedOrthogonalRotation(nn.Module):
 
         return sd
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        self._blocks_cache.clear()
         flag_key = prefix + "theta_is_quantized"
+        has_raw = any(key.startswith(prefix + "theta_raw.") for key in state_dict)
+        has_packed = all(
+            prefix + name in state_dict
+            for p in range(self.n_passes)
+            for t in range(self.m)
+            for name in (self._qname(p, t), self._sname(p, t))
+        )
+        if flag_key not in state_dict and not has_raw and not has_packed:
+            return super()._load_from_state_dict(
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            )
 
         quant_in_sd = False
         if flag_key in state_dict:
@@ -609,10 +633,33 @@ class FactorizedOrthogonalRotation(nn.Module):
                 if quant_in_sd:
                     break
 
+        for p in range(self.n_passes):
+            for t, radix in enumerate(self.stage_bs):
+                parameter = self.theta_raw[p][t]
+                key = prefix + f"theta_raw.{p}.{t}"
+                if quant_in_sd:
+                    self.theta_raw[p][t] = nn.Parameter(
+                        parameter.new_empty(0), requires_grad=False
+                    )
+                    state_dict.setdefault(key, parameter.new_empty(0))
+                elif parameter.numel() == 0:
+                    blocks = self.n // radix
+                    shape = (
+                        (blocks,) if self.stage_is_givens[t] else (blocks, radix, radix)
+                    )
+                    self.theta_raw[p][t] = nn.Parameter(parameter.new_empty(shape))
+
         self.theta_is_quantized.fill_(1 if quant_in_sd else 0)
 
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                      missing_keys, unexpected_keys, error_msgs)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
         self.theta_is_quantized.fill_(1 if quant_in_sd else 0)
 

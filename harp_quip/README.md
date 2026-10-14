@@ -44,6 +44,7 @@ The main comparison mode used in the paper is **no weight fine-tuning** (`--ft_e
   - `quantize_finetune_llama.py`: layerwise quantization and optional HARP fitting.
   - `hfize_llama.py`: export quantized checkpoints to Hugging Face format; supports `--quantize_harp_theta`.
   - `finetune_e2e_llama.py`: original-style end-to-end fine-tuning utility.
+  - `hessian_offline_qwen3.py`, `quantize_finetune_qwen3.py`, `hfize_qwen3.py`: Qwen3 calibration, quantization and export.
 
 - `harp_scripts/`
   - One-shot scripts for paper-style quantization, export, and evaluation.
@@ -54,6 +55,12 @@ The main comparison mode used in the paper is **no weight fine-tuning** (`--ft_e
   - `eval_speed.py`: decoding-style speed benchmark.
   - `interactive_gen.py`: interactive generation utility.
 
+- `packages/harp_runtime/`
+  - Standalone HARP transform execution and optimized prefill.
+
+- `lib/runtime/`
+  - QuIP codebook decoding, RHT acceleration and model adapters.
+
 - `quiptools/`
   - QuIP# CUDA kernels and build scripts.
 
@@ -63,47 +70,116 @@ Most other files follow upstream QuIP#, with small changes to pass HARP configur
 
 ## Installation
 
-Follow the QuIP# installation flow.
+Use Linux or WSL2, Python 3.10, an NVIDIA GPU, a compatible NVIDIA driver, and an installed CUDA toolkit with `nvcc`. Building the extensions also needs a CUDA-compatible C++ compiler and Ninja. The validated inference stack is PyTorch 2.8.0 with CUDA 12.9 and Transformers 4.51.3. The commands below use that stack.
 
-1. **Install Python dependencies**
+From the repository root:
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+conda create -n harp-inference python=3.10 -y
+conda activate harp-inference
+cd harp_quip
+python -m pip install --upgrade pip wheel
+python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu129
+python -m pip install -r requirements.txt
+```
 
-2. **Build and install QuIP# CUDA kernels**
+Ensure `nvcc --version` reports the intended toolkit and `CUDA_HOME` points to it if it is not detected automatically. Then build the backend and install the standalone HARP transform package:
 
-   ```bash
-   cd quiptools
-   python setup.py install
-   cd ..
-   ```
+```bash
+export MAX_JOBS=4
+python -m pip install --no-build-isolation ./quiptools
+python -m pip install --no-build-isolation \
+  'git+https://github.com/Dao-AILab/fast-hadamard-transform.git@e7706faf8d1c3b9f241e36860640ad1dac644ede'
+python -m pip install --no-build-isolation './packages/harp_runtime[cuda]'
+python -c "import torch, quiptools_cuda, fast_hadamard_transform; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
 
-3. **Install fast-hadamard-transform**
+## Fast inference with a quantized HARP model
 
-   Install from source if possible, or via pip if it works in your environment:
+Run these examples from `harp_quip/` in the environment above. The public [brain-lab/Llama-2-7b-QuIP-HARP-2Bit](https://huggingface.co/brain-lab/Llama-2-7b-QuIP-HARP-2Bit) checkpoint is already quantized.
 
-   ```bash
-   pip install fast-hadamard-transform
-   ```
+Generate text from the command line:
 
-   Source repository: `https://github.com/Dao-AILab/fast-hadamard-transform`
+```bash
+python -m eval.interactive_gen \
+  --hf_path brain-lab/Llama-2-7b-QuIP-HARP-2Bit \
+  --prompt 'The main advantages of model compression are' \
+  --max_new_tokens 128 --temperature 0
+```
 
-4. **Set model/data access tokens if needed**
+Omit `--prompt` for an interactive loop; add `--streaming` to stream generated text.
 
-   The reproduction scripts assume access to gated Llama checkpoints and, when downloading precomputed Hessians or uploading layer artifacts, Hugging Face access tokens:
+For use in Python:
 
-   ```bash
-   export HF_TOKEN=...
-   export HF_USER_ACCESS_TOKEN=...
-   export HF_UPLOAD_TOKEN=...   # only needed for upload/resume runs
-   ```
+```python
+import torch
+from transformers import AutoTokenizer
+from lib.runtime import accelerate
+from lib.utils.unsafe_import import model_from_hf_path
 
-Notes:
+model_id = "brain-lab/Llama-2-7b-QuIP-HARP-2Bit"
+model, tokenizer_id = model_from_hf_path(
+    model_id, use_cuda_graph=False, device_map="cuda:0"
+)
+model.eval()
+runtime = accelerate(model, shared_core=True)
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+tokenizer.pad_token = tokenizer.eos_token
+inputs = tokenizer(
+    "The main advantages of model compression are", return_tensors="pt"
+).to("cuda:0")
 
-- Use a CUDA/PyTorch stack compatible with your GPUs.
-- Hessian generation and HARP fitting can be memory intensive.
-- For Llama 2 70B or other long runs, use the resume/upload utilities described below.
+with torch.no_grad():
+    output = model.generate(
+        **inputs,
+        max_new_tokens=128,
+        do_sample=False,
+        use_cache=True,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+
+print(
+    tokenizer.decode(
+        output[0, inputs.input_ids.shape[1]:], skip_special_tokens=True
+    )
+)
+```
+
+`accelerate` installs optimized HARP transforms and packed decoding in memory. The first request includes compilation and cache preparation; warm up before measuring latency. Use `runtime.remove()` to restore original methods.
+
+### Inference evaluation
+
+A fixed-shape, single-token CUDA-graph benchmark:
+
+```bash
+python -m eval.eval_speed \
+  --hf_path brain-lab/Llama-2-7b-QuIP-HARP-2Bit \
+  --protocol static --output_path results/harp_static.json
+```
+
+The default is batch=sequence=1, with 32 warmups and 512 timed forwards per round. This measures repeated fixed-shape forward calls with no KV cache; it is not a complete text-generation request.  `--no_use_cuda_graph` selects eager timing.
+
+Growing-cache generation benchmark:
+
+```bash
+python -m eval.eval_speed \
+  --hf_path brain-lab/Llama-2-7b-QuIP-HARP-2Bit \
+  --protocol generation --output_path results/harp_generation.json
+```
+
+Defaults are 512 prompt tokens, 128 generated tokens and batches 1/4, without graphs. Results report time to first token, decode throughput and complete request latency.
+
+Perplexity and zero-shot evaluation:
+
+```bash
+python -m eval.eval_ppl \
+  --hf_path brain-lab/Llama-2-7b-QuIP-HARP-2Bit \
+  --datasets wikitext2 --seqlen 4096 --output_path results/harp_ppl.json
+
+python -m eval.eval_zeroshot \
+  --hf_path brain-lab/Llama-2-7b-QuIP-HARP-2Bit \
+  --tasks piqa,arc_challenge --batch_size 1 --output_path results/harp_tasks.json
+```
 
 ---
 

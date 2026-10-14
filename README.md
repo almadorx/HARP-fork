@@ -149,15 +149,20 @@ Use `harp_qtip/` for the QTIP integration / portability experiment. The HARP mod
 
 ### QuIP# + HARP
 
+Follow the [QuIP installation instructions](harp_quip/README.md#installation) for the shared Llama/Qwen3 Python 3.10 / PyTorch 2.8 / CUDA 12.9 environment, QuIP tools, Hadamard dependency and HARP runtime package. Run QuIP commands from `harp_quip/`.
+
+Use an existing quantized checkpoint directly:
+
 ```bash
 cd harp_quip
-pip install -r requirements.txt
-cd quiptools
-python setup.py install
-cd ..
+python -m eval.interactive_gen \
+  --hf_path brain-lab/Llama-2-7b-QuIP-HARP-2Bit \
+  --prompt 'The main advantages of model compression are' \
+  --max_new_tokens 128 --temperature 0
 ```
 
-Then see `harp_quip/README.md` and the scripts under `harp_quip/harp_scripts/`.
+The [fast inference guide](harp_quip/README.md#fast-inference-with-a-quantized-harp-model) includes Python usage, tokenizer access requirements, timing, memory and quality-evaluation commands.
+For quantization, see the scripts under `harp_quip/harp_scripts/`.
 
 ### QTIP + HARP
 
