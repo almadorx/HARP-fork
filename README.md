@@ -15,6 +15,10 @@
   <b>Learnable orthogonal preprocessing for extreme LLM quantization</b>
 </p>
 
+<p align="center">
+  🇷🇺 <a href="README.ru.md">Русская версия README</a>
+</p>
+
 > **TL;DR**
 >
 > HARP replaces the fixed randomized Hadamard transform used in SOTA PTQ pipelines with a learnable structured orthogonal processor trained only on calibration data. It improves quantization quality while preserving the original quantizer, deployment pipeline, and inference efficiency.
